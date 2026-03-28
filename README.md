@@ -2,7 +2,7 @@
 
 > **Audience :** Software engineers who want production-grade Claude Code setups, not toy demos.  
 > **Scope :** Local workflows + GitHub CI/CD + token efficiency + git hygiene.  
-> **Series :** Companion to [`claude-code-token-optimization.md`](./claude-code-token-optimization.md) — prompt customization & cost strategies.
+> **Series :** Companion to [claude-code-token-optimization.md](https://github.com/papasega/claude-code-token-optimization), prompt customization & cost strategies.
 
 > **Version :** Claude Code ≥ 2.1 · Last updated: 2026-03 · Verify with `claude --version`
 
