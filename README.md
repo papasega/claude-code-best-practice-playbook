@@ -4,7 +4,7 @@
 > **Scope :** Local workflows + GitHub CI/CD + token efficiency + git hygiene.  
 > **Series :** Companion to [claude-code-token-optimization.md](https://github.com/papasega/claude-code-token-optimization), prompt customization & cost strategies.
 
-> **Version :** Claude Code ≥ 2.1 · Last updated: 2026-03 · Verify with `claude --version`
+> **Version :** Claude Code ≥ 2.1.270 · Last updated: 2026-09 · Verify with `claude --version`
 
 ---
 ![Claude Code Best Practice](./ndapli/ccbppb_psw.png)
@@ -119,11 +119,10 @@ Result enters context window → Claude reasons again
     ]
   },
 
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "effortLevel": "medium",
 
   "env": {
-    "MAX_THINKING_TOKENS": "8000",
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1"
   },
 
@@ -177,9 +176,9 @@ Result enters context window → Claude reasons again
 
 | Decision | Why |
 |---|---|
-| `"model": "claude-sonnet-4-6"` | Team default — cheaper than Opus, covers 95% of tasks |
-| `"effortLevel": "medium"` | Prevents runaway thinking tokens on routine tasks |
-| `MAX_THINKING_TOKENS=8000` | Hard cap on thinking budget per turn |
+| `"model": "claude-sonnet-5"` | Team default — cheaper than Opus, covers 95% of tasks |
+| `"effortLevel": "medium"` | Overrides the actual default (`high`) to prevent runaway thinking tokens on routine tasks |
+| No fixed thinking-token cap | Adaptive thinking + `effortLevel` now replace the old fixed thinking-token budget — don't set `MAX_THINKING_TOKENS` |
 | `attribution: {commit: "", pr: ""}` | Claude's `Co-Authored-By` line is suppressed from all commits/PRs |
 | `disabledMcpjsonServers: ["filesystem"]` | Block raw filesystem MCP access — use Read/Write tools instead |
 | `deny` on `git push/commit/merge` | Enforce human-only git history (see §10) |
@@ -189,7 +188,7 @@ Result enters context window → Claude reasons again
 ```json
 {
   "effortLevel": "high",
-  "model": "claude-opus-4-6"
+  "model": "claude-opus-5"
 }
 ```
 
@@ -205,7 +204,7 @@ Use this to temporarily upgrade model/effort on your machine without affecting t
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
 
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "effortLevel": "medium",
   "autoUpdatesChannel": "stable",
 
@@ -221,10 +220,6 @@ Use this to temporarily upgrade model/effort on your machine without affecting t
       "Bash(sudo *)",
       "Bash(rm -rf *)"
     ]
-  },
-
-  "env": {
-    "MAX_THINKING_TOKENS": "8000"
   }
 }
 ```
@@ -300,7 +295,7 @@ CLAUDE.md is loaded into context at the start of every session — every line co
 
 The context window holds everything: conversation history, file reads, bash output, CLAUDE.md, skills loaded, subagent responses. It fills fast. LLM performance degrades as it fills — Claude "forgets" earlier instructions, makes more mistakes.
 
-**The auto-compact threshold is ~75% by default.** Do not wait for it. Manage context proactively.
+**The auto-compact threshold is ~85% by default.** Do not wait for it. Manage context proactively.
 
 ### When to use each command
 
@@ -308,7 +303,7 @@ The context window holds everything: conversation history, file reads, bash outp
 |---|---|---|
 | Switching to unrelated task | `/clear` (or `/reset` or `/new`) | Wipes all history. File edits persist. |
 | Long session, still on same task | `/compact [instructions]` | Replaces history with a dense summary |
-| Want to try a different approach | `/fork` | Branch conversation, experiment, resume the original |
+| Want to try a different approach | `/branch` | Branch conversation, experiment, resume the original |
 | Quick lookup, don't want it in context | `/btw [question]` | Answer appears in overlay, never enters history |
 | Session getting foggy | `Esc + Esc` | Open rewind menu — roll back conversation or code |
 | Resume yesterday's session | `claude -c` | Continue the most recent session in current dir |
@@ -327,8 +322,8 @@ Named sessions appear in history and are findable weeks later.
 
 **Compaction is triggered by :**
 - You running `/compact`
-- Auto-compact at ~75% fill
-- You can override the threshold : `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60`
+- Auto-compact at ~85% fill
+- You can lower the threshold : `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60` — it cannot be raised above ~83% because of the reserved buffer
 
 ### The subagent pattern for research
 
@@ -349,16 +344,18 @@ The subagent runs in a **separate, isolated context window**. It explores, then 
 Hooks are shell scripts (or HTTP endpoints) that run at specific points in Claude Code's lifecycle. Unlike CLAUDE.md instructions — which are requests Claude interprets — **hooks execute deterministically, every time**.
 
 **Exit code contract :**
-- `exit 0` → allow (optionally with `{"decision": "allow"}` on stdout)
-- `exit 1` or `exit 2` → block (Claude sees the reason from stderr/stdout)
+- `exit 0` → success (optionally with `{"decision": "allow"}` on stdout)
+- `exit 1` → non-blocking error — shown to the user, execution continues
+- `exit 2` → blocking error — Claude receives the error on stderr and must address it
 - `exit 0` + JSON with `decision: block` on stdout → block with explanation
 
 **Hook input :** all hooks receive a JSON object on `stdin`. For tool events, `tool_name` and `tool_input` are the key fields.
 
 **Environment variables available in hooks :**
 - `$CLAUDE_PROJECT_DIR` — absolute path to project root
-- `$CLAUDE_TOOL_INPUT_FILE_PATH` — file path for Edit/Write hooks (shortcut vs parsing stdin)
-- `$CLAUDE_SESSION_ID` — current session ID
+- `$CLAUDE_PLUGIN_ROOT` — absolute path to the plugin providing the hook, if any
+- `$CLAUDE_EFFORT` — effort level active for the current turn
+- `$CLAUDE_CODE_BRIDGE_SESSION_ID` — current session ID
 
 Two implementation styles are valid and can coexist:
 - **Inline JSON command** (used in settings.json §1): best for simple one-liner logic, easier to version with the project config
@@ -442,10 +439,13 @@ exit 0
 ```bash
 #!/bin/bash
 # Auto-run formatter after Claude edits a file
-# Uses $CLAUDE_TOOL_INPUT_FILE_PATH env var (no stdin parsing needed for PostToolUse)
 set -euo pipefail
 
-FILE="${CLAUDE_TOOL_INPUT_FILE_PATH:-}"
+INPUT=$(cat)
+FILE=$(echo "$INPUT" | python3 -c "
+import json, sys
+print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))
+" 2>/dev/null || echo "")
 
 if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
   exit 0
@@ -751,7 +751,7 @@ Subagents are separate Claude Code instances with their own context window. When
 - Parallel independent tasks (test one module while refactoring another)
 - Specialized review tasks that shouldn't pollute the main session
 
-### Subagent: code-explorer (Haiku — 10× cheaper)
+### Subagent: code-explorer (Haiku — ~2× cheaper)
 
 **`.claude/agents/code-explorer.md`**
 
@@ -875,7 +875,7 @@ jobs:
           # Only these tools are available — no Write, no git push/commit
           claude_args: |
             --max-turns 5
-            --model claude-sonnet-4-6
+            --model claude-sonnet-5
             --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log --oneline *),Bash(npm run test *),Bash(npm run type-check),mcp__github__create_review_comment,mcp__github__create_issue_comment"
 ```
 
@@ -917,7 +917,7 @@ jobs:
 
           claude_args: |
             --max-turns 3
-            --model claude-haiku-4-5-20251001
+            --model claude-haiku-4-5
             --allowedTools "Read,Grep,Glob,Bash(git diff *),mcp__github__create_issue_comment"
 ```
 
@@ -1067,7 +1067,7 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 | `/clear` | Wipe all history. File edits persist. | Switching to unrelated task |
 | `/compact [instructions]` | Summarize history into dense context | Context > 70%, still on same task |
 | `/rename [name]` | Name the current session | Before `/clear` so you can resume it |
-| `/fork` | Branch conversation for experimentation | Trying a risky approach |
+| `/branch` | Branch conversation for experimentation | Trying a risky approach |
 | `/rewind` (or `Esc + Esc`) | Roll back conversation or code state | Wrong direction, need to backtrack |
 | `/export` | Export session as plain text | Postmortems, sharing with teammates |
 | `claude -c` | Resume most recent session | Coming back to yesterday's work |
@@ -1079,7 +1079,7 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 |---|---|
 | `/context` | Context window usage (%) |
 | `/cost` | Token usage + cost this session (API users) |
-| `/stats` | Usage breakdown (Pro/Max users) |
+| `/stats` *(unofficial — not in the official docs)* | Usage breakdown (Pro/Max users) |
 | `/status` | Active settings sources, MCP servers, model |
 | `/doctor` | Installation health check |
 
@@ -1088,10 +1088,12 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 | Command | Effect |
 |---|---|
 | `/model` | Open model picker |
-| `/effort low` | ~2k thinking tokens — fast, cheap, routine tasks |
-| `/effort medium` | ~8k thinking tokens — default, balanced |
-| `/effort high` | ~16k thinking tokens — complex debugging, architecture |
-| `ultrathink` in prompt | Triggers high effort for that one turn only |
+| `/effort low` | Minimal reasoning — fast, cheap, routine tasks |
+| `/effort medium` | Balanced reasoning for everyday work |
+| `/effort high` | Deeper reasoning for complex debugging and architecture — **default** |
+| `/effort xhigh` | Extended reasoning for hard, multi-step problems |
+| `/effort max` | Maximum reasoning depth — reserved for the hardest tasks |
+| `ultrathink` in prompt | Triggers deeper reasoning for that one turn only |
 
 ### Workflow
 
@@ -1125,7 +1127,7 @@ Pro and Max subscribers pay a flat monthly fee — `/cost` reports token counts 
 
 | Command | What it shows | Plan |
 |---|---|---|
-| `/stats` | Usage patterns over time | Pro / Max |
+| `/stats` *(unofficial — not in the official docs)* | Usage patterns over time | Pro / Max |
 | `/usage` | Reset timing + remaining allocation | Pro / Max |
 | `/context` | Context window % used in current session | All |
 | `/status` | Active model, settings, MCP servers | All |
@@ -1245,9 +1247,12 @@ The weekly limit resets every 7 days. Plan intensive work accordingly:
 
 | Model | Cost weight | Use for |
 |---|---|---|
-| Haiku | ~0.1× | All exploration subagents, simple grep/read tasks |
-| Sonnet 4.6 | 1× | Default — 95% of tasks |
-| Opus 4.6 | ~1.7× | Architecture decisions, complex multi-step reasoning only |
+| Haiku 4.5 | ~0.5× | All exploration subagents, simple grep/read tasks |
+| Sonnet 5 | 1× (baseline) | Default — 95% of tasks |
+| Opus 5 | ~2.5× | Architecture decisions, complex multi-step reasoning only |
+| Fable 5.1 | ~5× | Rare, highest-capability tasks only |
+
+Sonnet 5 is itself cheaper than Sonnet 4.6 ($2/$10 per million input/output tokens vs $3/$15) — the weights above are relative to Sonnet 5, not an older generation.
 
 Switching from Sonnet to Haiku for exploration subagents when above 75% weekly usage extends your budget significantly without impacting output quality on the core tasks.
 
@@ -1260,13 +1265,12 @@ Switching from Sonnet to Haiku for exploration subagents when above 75% weekly u
 | CLAUDE.md ≤ 150 lines | Less context loaded at startup | −2k–8k tokens/session |
 | Skills on-demand | Skill content loads only when invoked | −1k–5k tokens/session |
 | Large-file hook (>300 lines) | Intercept before context pollution | −10k–50k tokens/session |
-| `MAX_THINKING_TOKENS=8000` | Cap thinking budget per turn | −30–50% on thinking |
 | `/compact` every 30 min | Eliminate accumulated noise | Variable, often largest gain |
 | `/clear` between tasks | Zero carryover between unrelated work | ~100% context freed |
 | `/btw` for quick lookups | Never enters conversation history | −500–2k per lookup |
-| Haiku for subagents | 10× cheaper model for exploration | −80–90% on research calls |
+| Haiku for subagents | ~2× cheaper model for exploration | ~−50% on research calls |
 | `--allowedTools` in CI | Narrow tool surface in GitHub Actions | −40–60% in CI runs |
-| `effortLevel: medium` default | Prevents over-thinking on routine tasks | Baseline efficiency |
+| `effortLevel: medium` override | Prevents over-thinking on routine tasks (actual default is `high`) | Baseline efficiency |
 | SessionStart hook with git context | Avoid manual `git status` at start | −200–500 tokens/session |
 
 **Monitoring :** Run `/context` every 20–30 min. At 70%+, compact before degradation begins. Run `/usage-monitor` at session start when on Pro/Max to check weekly budget.
@@ -1351,7 +1355,7 @@ project/
 
 | Mistake | Correct approach |
 |---|---|
-| `post-edit.sh "$1"` (file path as arg) | Hooks don't receive args. Use `$CLAUDE_TOOL_INPUT_FILE_PATH` or parse stdin JSON. |
+| `post-edit.sh "$1"` (file path as arg) | Hooks don't receive args. Parse the `tool_input.file_path` field from stdin JSON. |
 | Not making hooks executable | `chmod +x .claude/hooks/*.sh` is required. |
 | Not checking `stop_hook_active` in Stop hooks | Causes infinite loops. Always gate on this field. |
 | Hardcoding paths in hook commands | Use `$CLAUDE_PROJECT_DIR` prefix for portability. |
