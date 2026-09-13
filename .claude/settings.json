@@ -1,14 +1,14 @@
 {
-  "enabledPlugins": [
-    "andrej-karpathy-skills@karpathy-skills",
-    "document-skills@anthropic-agent-skills"
-  ],
+  "enabledPlugins": {
+    "andrej-karpathy-skills@karpathy-skills": true,
+    "document-skills@anthropic-agent-skills": true
+  },
   "extraKnownMarketplaces": {
     "karpathy-skills": {
-      "source": { "type": "github", "repo": "forrestchang/andrej-karpathy-skills" }
+      "source": { "source": "github", "repo": "forrestchang/andrej-karpathy-skills" }
     },
     "anthropic-agent-skills": {
-      "source": { "type": "github", "repo": "anthropics/skills" }
+      "source": { "source": "github", "repo": "anthropics/skills" }
     }
   }
 }
