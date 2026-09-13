@@ -2,7 +2,7 @@
 
 > **Audience :** Software engineers who want production-grade Claude Code setups, not toy demos.  
 > **Scope :** Local workflows + GitHub CI/CD + token efficiency + git hygiene.  
-> **Series :** Companion to [claude-code-token-optimization.md](https://github.com/papasega/claude-code-token-optimization), prompt customization & cost strategies.
+> **Series :** Canonical reference for the companion [claude-code-token-optimization](https://github.com/papasega/claude-code-token-optimization) prompt.
 
 > **Version :** Claude Code ≥ 2.1.270 · Last updated: 2026-09 · Verify with `claude --version`
 
@@ -23,18 +23,18 @@
 10. [Git History Policy](#10-git-history-policy)
 11. [Code Quality Automation — REVIEW.md + hooks](#11-code-quality-automation--reviewmd--hooks)
 12. [Command Reference](#12-command-reference)
-13. [Usage Monitoring — Pro/Max Plans](#13-usage-monitoring--promax-plans)
+13. [Usage Monitoring](#13-usage-monitoring)
 14. [Token Optimization Table](#14-token-optimization-table)
 15. [File Structure Reference](#15-file-structure-reference)
 16. [Gotchas & Common Mistakes](#16-gotchas--common-mistakes)
 
 ---
 
-> **TL;DR — 5 rules that cover 80% of the value:**
-> 1. Keep `CLAUDE.md` under 150 lines — move everything else to skills
-> 2. Set up hooks for git safety and large-file blocking — they fire deterministically, not "when Claude feels like it"
-> 3. Use subagents (Haiku) for exploration, keep the main context clean for implementation
-> 4. `/compact` every 30 min, `/clear` between unrelated tasks
+> **TL;DR — core rules:**
+> 1. Keep `CLAUDE.md` under 200 lines — move procedures and references to skills
+> 2. Set up hooks for git safety and large-file guidance — they fire deterministically, not "when Claude feels like it"
+> 3. Use subagents for exploration, keep the main context clean for implementation
+> 4. Use `/compact` when the current task needs room; use `/clear` between unrelated tasks
 > 5. Claude modifies files, you own `git log` — enforce with `permissions.deny` + `attribution: {"commit":"","pr":""}`
 
 ## 1. Mental Model
@@ -119,9 +119,6 @@ Result enters context window → Claude reasons again
     ]
   },
 
-  "model": "claude-sonnet-5",
-  "effortLevel": "medium",
-
   "env": {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "1"
   },
@@ -143,7 +140,7 @@ Result enters context window → Claude reasons again
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-git.sh"
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/validate-bash.sh"
           }
         ]
       },
@@ -152,14 +149,14 @@ Result enters context window → Claude reasons again
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-large-read.sh"
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/advise-large-read.sh"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Write|Edit",
         "hooks": [
           {
             "type": "command",
@@ -176,11 +173,11 @@ Result enters context window → Claude reasons again
 
 | Decision | Why |
 |---|---|
-| `"model": "claude-sonnet-5"` | Team default — cheaper than Opus, covers 95% of tasks |
-| `"effortLevel": "medium"` | Overrides the actual default (`high`) to prevent runaway thinking tokens on routine tasks |
-| No fixed thinking-token cap | Adaptive thinking + `effortLevel` now replace the old fixed thinking-token budget — don't set `MAX_THINKING_TOKENS` |
+| No project-wide model override | Inherit the account or user default unless the project has evaluated requirements |
+| No project-wide effort override | Inherit the model default; change effort explicitly when the task requires it |
+| No global fixed thinking-token override | Inherit the active model's reasoning mode and select effort per task; use `MAX_THINKING_TOKENS` only when intentionally operating a fixed-budget mode |
 | `attribution: {commit: "", pr: ""}` | Claude's `Co-Authored-By` line is suppressed from all commits/PRs |
-| `disabledMcpjsonServers: ["filesystem"]` | Block raw filesystem MCP access — use Read/Write tools instead |
+| `disabledMcpjsonServers: ["filesystem"]` | Reject the project MCP server named `filesystem`; review actual server names in `.mcp.json` |
 | `deny` on `git push/commit/merge` | Enforce human-only git history (see §10) |
 
 **`.claude/settings.local.json`** — local overrides, never committed :
@@ -188,11 +185,11 @@ Result enters context window → Claude reasons again
 ```json
 {
   "effortLevel": "high",
-  "model": "claude-opus-5"
+  "model": "opus"
 }
 ```
 
-Use this to temporarily upgrade model/effort on your machine without affecting team defaults. Claude Code auto-adds it to `.gitignore`.
+Use this to override model or effort on your machine without affecting team defaults. Claude Code auto-adds it to `.gitignore`.
 
 ---
 
@@ -204,8 +201,6 @@ Use this to temporarily upgrade model/effort on your machine without affecting t
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
 
-  "model": "claude-sonnet-5",
-  "effortLevel": "medium",
   "autoUpdatesChannel": "stable",
 
   "permissions": {
@@ -235,12 +230,12 @@ When the same key appears in multiple scopes, the higher scope wins. **Exception
 
 ## 4. CLAUDE.md — the right way
 
-CLAUDE.md is loaded into context at the start of every session — every line costs tokens on every turn. Treat it like code: ruthless brevity, zero redundancy.
+CLAUDE.md is loaded into context at the start of every session — every line adds tokens on every turn. Treat it like code: ruthless brevity, zero redundancy.
 
 **Rules :**
 - **Global** (`~/.claude/CLAUDE.md`) : ≤ 200 lines — personal style, universal conventions
-- **Project** (`CLAUDE.md` or `.claude/CLAUDE.md`) : ≤ 150 lines — project-specific only
-- **Subdirectory** (e.g. `src/api/CLAUDE.md`) : ≤ 50 lines — loaded only when Claude reads files in that directory
+- **Project** (`CLAUDE.md` or `.claude/CLAUDE.md`) : under 200 lines — project-specific only
+- **Subdirectory** (e.g. `src/api/CLAUDE.md`) : concise and path-specific — loaded only when Claude reads files in that directory
 - **Never duplicate** rules that already exist at a higher level
 - **Use `<!-- comment -->`** for maintainer notes — stripped from context automatically
 - **Move workflows to skills** — they load on-demand, not at startup
@@ -297,8 +292,8 @@ The context window holds everything: conversation history, file reads, bash outp
 
 **Auto-compaction is configured as a token budget, not a universal percentage.** The
 *auto-compact window* is how full the context may get before Claude Code compacts, and
-its default is tuned per model — on Sonnet 5's 1M context, sessions compact at roughly
-967K tokens. Do not wait for it. Manage context proactively.
+its automatic value is tuned for the active model. Use `/context` to inspect the
+current session instead of assuming a fixed threshold.
 
 ### When to use each command
 
@@ -365,7 +360,7 @@ Hooks are shell scripts (or HTTP endpoints) that run at specific points in Claud
 
 **Blocking a `PreToolUse` call — two valid shapes, never mixed :**
 
-1. **Plain text on stderr + `exit 2`.** Simplest, and what the hooks below use.
+1. **Plain text on stderr + `exit 2`.** Simplest, and what the blocking hook below uses.
 2. **Structured JSON on stdout + `exit 0`**, with the decision nested inside
    `hookSpecificOutput`:
 
@@ -403,18 +398,19 @@ Two implementation styles are valid and can coexist:
 Both styles receive JSON on stdin and communicate via exit codes.
 Choose inline for simplicity, external scripts for maintainability.
 
-### Hook 1 : Block destructive git operations
+### Hook 1 : Intercept known-dangerous Bash commands
 
-**`.claude/hooks/guard-git.sh`** — make executable with `chmod +x`
+**`.claude/hooks/validate-bash.sh`** — make executable with `chmod +x`
 
 ```bash
 #!/bin/bash
-# Block git write operations — developer commits manually.
+# validate-bash.sh — PreToolUse hook for Bash commands.
+# Blocks a set of known-dangerous command shapes before Claude Code runs them.
 # Protocol: plain text on stderr + exit 2. Silence + exit 0 to allow.
 set -euo pipefail
 
 INPUT=$(cat)
-CMD=$(printf '%s' "$INPUT" | python3 -c "
+COMMAND=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -424,28 +420,64 @@ if isinstance(data, dict):
     print(data.get('tool_input', {}).get('command', ''))
 " 2>/dev/null || true)
 
-if [ -z "${CMD:-}" ]; then
+if [ -z "${COMMAND:-}" ]; then
   exit 0
 fi
 
-# POSIX classes: grep -E does not understand \s.
-if printf '%s' "$CMD" | grep -qE '^git[[:space:]]+(push|commit|checkout|merge|rebase|reset[[:space:]]+--hard|branch[[:space:]]+-[dD])([[:space:]]|$)'; then
-  printf 'Git write operation blocked by project policy: %s\n' "$CMD" >&2
-  printf 'Review the changes with git diff, then commit manually.\n' >&2
+# Command boundary: start of string, or after a shell separator.
+# POSIX classes throughout — grep -E does not understand \s.
+BOUNDARY='(^|[[:space:]]|;|&&|\|\||\|)'
+
+block() {
+  printf '%s\n' "$1" >&2
   exit 2
+}
+
+if printf '%s' "$COMMAND" | grep -qE "${BOUNDARY}git[[:space:]]+push([[:space:]]|$)"; then
+  block "git push is blocked by policy. Push manually after reviewing the diff."
+fi
+
+if printf '%s' "$COMMAND" | grep -qE "${BOUNDARY}git[[:space:]]+reset[[:space:]]+--hard([[:space:]]|$)"; then
+  block "git reset --hard is blocked: it discards uncommitted work irreversibly."
+fi
+
+# rm with both recursive and force, in either order, short or long form.
+RM_SHORT_RF="-[A-Za-z]*r[A-Za-z]*f"
+RM_SHORT_FR="-[A-Za-z]*f[A-Za-z]*r"
+RM_LONG_RF="--recursive([[:space:]]+-[A-Za-z-]+)*[[:space:]]+--force"
+RM_LONG_FR="--force([[:space:]]+-[A-Za-z-]+)*[[:space:]]+--recursive"
+RM_SPLIT_RF="-[A-Za-z]*r[A-Za-z]*([[:space:]]+-[A-Za-z-]+)*[[:space:]]+-[A-Za-z]*f"
+RM_SPLIT_FR="-[A-Za-z]*f[A-Za-z]*([[:space:]]+-[A-Za-z-]+)*[[:space:]]+-[A-Za-z]*r"
+
+if printf '%s' "$COMMAND" | grep -qE \
+  "${BOUNDARY}rm[[:space:]]+([A-Za-z-]+[[:space:]]+)*(${RM_SHORT_RF}|${RM_SHORT_FR}|${RM_LONG_RF}|${RM_LONG_FR}|${RM_SPLIT_RF}|${RM_SPLIT_FR})([[:space:]]|$)"; then
+  block "Recursive forced delete (rm -rf and equivalents) is blocked."
+fi
+
+if printf '%s' "$COMMAND" | grep -qE "${BOUNDARY}chmod[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*777([[:space:]]|$)"; then
+  block "chmod 777 is blocked: world-writable permissions are almost never intended."
+fi
+
+if printf '%s' "$COMMAND" | grep -qE '(>|>>)[[:space:]]*/(etc|usr|var|boot|sys)/'; then
+  block "Writing into a system directory is blocked."
 fi
 
 exit 0
 ```
 
-### Hook 2 : Block accidental large-file reads (token waste)
+This hook complements permission rules; it does not parse shell grammar. Quoting,
+wrappers, aliases and variable indirection can evade regular expressions, while a
+quoted mention such as `echo git push` may be blocked. Treat it as defence in depth,
+not as a complete security boundary.
 
-**`.claude/hooks/guard-large-read.sh`**
+### Hook 2 : Advise on large-file reads
+
+**`.claude/hooks/advise-large-read.sh`**
 
 ```bash
 #!/bin/bash
-# Block Read tool on files > 300 lines — enforce grep/sed extraction.
-# Protocol: plain text on stderr + exit 2. Silence + exit 0 to allow.
+# advise-large-read.sh — PreToolUse hook for the Read tool.
+# Adds guidance for large files without denying the read.
 set -euo pipefail
 
 INPUT=$(cat)
@@ -459,7 +491,6 @@ if isinstance(data, dict):
     print(data.get('tool_input', {}).get('file_path', ''))
 " 2>/dev/null || true)
 
-# Early exit: no file path or file doesn't exist
 if [ -z "${FILE:-}" ] || [ ! -f "$FILE" ]; then
   exit 0
 fi
@@ -468,15 +499,28 @@ LINES=$(wc -l < "$FILE" 2>/dev/null | tr -d '[:space:]' || echo 0)
 case "$LINES" in ''|*[!0-9]*) exit 0 ;; esac
 
 if [ "$LINES" -gt 300 ]; then
-  printf '%s has %s lines. Use targeted extraction instead of a full read:\n' "$FILE" "$LINES" >&2
-  printf '  grep -n "pattern" %s | head -20\n' "$FILE" >&2
-  printf '  sed -n "/^def target/,/^def /p" %s | head -50\n' "$FILE" >&2
-  printf 'Read the whole file only when the task needs its global context.\n' >&2
-  exit 2
+  FILE="$FILE" LINES="$LINES" python3 -c "
+import json, os
+path = os.environ['FILE']
+lines = os.environ['LINES']
+print(json.dumps({
+    'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'additionalContext': (
+            f'{path} has {lines} lines. Start with targeted extraction when '
+            'locating a symbol or error. Read the complete file when the task '
+            'depends on its invariants, control flow, or interactions.'
+        ),
+    }
+}))
+"
 fi
 
 exit 0
 ```
+
+The hook returns guidance only. It deliberately omits `permissionDecision`, so the
+normal permission flow continues and Claude can read the whole file when necessary.
 
 ### Hook 3 : Auto-format on file write (PostToolUse)
 
@@ -619,10 +663,13 @@ This injects the current git branch and last commit into every session start —
 
 ## 7. Skills Architecture
 
-Skills are on-demand context: **zero startup cost, full content loaded only when invoked**. Move everything workflow-specific from CLAUDE.md into skills.
+Skills keep their full body out of context until invocation. Their names and
+descriptions remain in the discovery context unless model invocation is disabled,
+so keep descriptions concise and move workflow details into the skill body.
 
-**At startup, Claude loads only :** `name` + `description` from each skill (~30–50 tokens total per skill).  
-**When a skill is triggered :** the full `SKILL.md` content loads into context.
+**At startup, Claude loads :** `name` + `description` from each model-invocable skill.
+**When a skill is triggered in a regular session :** the full `SKILL.md` body loads
+into context. Skills explicitly preloaded into a subagent load when that subagent starts.
 
 ### Skill: project-architecture
 
@@ -646,7 +693,7 @@ description: >
 - `src/utils/`  — Pure utility functions (no side effects)
 - `tests/`      — Jest test suite, co-located `__tests__/` dirs
 
-## Key entry points (use grep, not full file reads)
+## Locate key entry points before selecting what context to read
 ```bash
 # Find all route definitions
 grep -rn "router\.\(get\|post\|put\|delete\)" src/api/ --include="*.ts"
@@ -682,11 +729,14 @@ description: >
 
 # Code Review Process
 
-## Step 1: Scope the diff (never read full files)
+## Step 1: Start with the diff
 ```bash
 git diff HEAD~1 --stat              # What changed and how much
 git diff HEAD~1 -- path/to/file.ts  # Targeted diff for one file
 ```
+
+Read surrounding sections or the full files whenever the review requires their
+contracts, invariants, or control flow.
 
 ## Step 2: Review checklist
 
@@ -855,7 +905,7 @@ Subagents are separate Claude Code instances with their own context window. When
 - Parallel independent tasks (test one module while refactoring another)
 - Specialized review tasks that shouldn't pollute the main session
 
-### Subagent: code-explorer (Haiku — ~2× cheaper)
+### Subagent: code-explorer
 
 **`.claude/agents/code-explorer.md`**
 
@@ -866,8 +916,6 @@ description: >
   Fast codebase exploration. Use for: finding where X is implemented,
   mapping dependencies, understanding module behavior before editing.
   Returns a compact summary — does NOT read full files when unnecessary.
-model: haiku
-effort: low
 maxTurns: 10
 tools: Read, Bash, Glob, Grep
 ---
@@ -878,7 +926,8 @@ You are a fast, efficient code navigator. Explore, then summarize compactly.
 - Use `grep -n "pattern" file` instead of reading entire files
 - Use `grep -rn "symbol" src/ -l` to find files before reading them
 - Stop when you have enough to answer — do not explore exhaustively
-- Never read files > 200 lines in full without justification
+- Use targeted extraction when locating one symbol; read the full file when its
+  invariants or control flow are relevant
 
 ## Response format (ALWAYS)
 Return a JSON block:
@@ -893,7 +942,7 @@ Return a JSON block:
 ```
 ````
 
-### Subagent: pr-reviewer (Sonnet — thorough review)
+### Subagent: pr-reviewer
 
 **`.claude/agents/pr-reviewer.md`**
 
@@ -904,8 +953,6 @@ description: >
   Thorough PR review. Use when a developer asks for a full review
   of their implementation. Runs the full code-review checklist,
   returns structured feedback for a GitHub comment.
-model: sonnet
-effort: medium
 maxTurns: 15
 tools: Read, Bash, Grep, Glob
 ---
@@ -979,7 +1026,6 @@ jobs:
           # Only these tools are available — no Write, no git push/commit
           claude_args: |
             --max-turns 5
-            --model claude-sonnet-5
             --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log --oneline *),Bash(npm run test *),Bash(npm run type-check),mcp__github__create_review_comment,mcp__github__create_issue_comment"
 ```
 
@@ -1021,7 +1067,6 @@ jobs:
 
           claude_args: |
             --max-turns 3
-            --model claude-haiku-4-5
             --allowedTools "Read,Grep,Glob,Bash(git diff *),mcp__github__create_issue_comment"
 ```
 
@@ -1136,12 +1181,14 @@ git push
 ## Performance checklist
 - Paginate all list endpoints (no `SELECT *` without LIMIT)
 - Avoid N+1: use `include` in Prisma or join in raw SQL
-- Cache expensive computations with Redis TTL
+- Cache repeated computations with Redis TTL when invalidation is well defined
 ```
 
 ### Auto-format hook (PostToolUse) — already in §6
 
-The `auto-format.sh` hook fires on every `Write|Edit|MultiEdit` event. For TypeScript projects, this means Prettier runs on every file Claude touches. No more "format on save" step — it's automatic.
+The `auto-format.sh` hook fires after the `Write` and `Edit` tools. For TypeScript
+projects, this means Prettier runs on files changed through those tools. Shell-based
+file changes require separate coverage if they must also be formatted.
 
 ### Type-check hook (Stop) — gate the session end
 
@@ -1206,7 +1253,7 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 | Command | What it does | When to use |
 |---|---|---|
 | `/clear` | Wipe all history. File edits persist. | Switching to unrelated task |
-| `/compact [instructions]` | Summarize history into dense context | Context > 70%, still on same task |
+| `/compact [instructions]` | Summarize history into dense context | Context is crowded, still on same task |
 | `/rename [name]` | Name the current session | Before `/clear` so you can resume it |
 | `/branch` | Branch conversation for experimentation | Trying a risky approach |
 | `/rewind` (or `Esc + Esc`) | Roll back conversation or code state | Wrong direction, need to backtrack |
@@ -1214,13 +1261,12 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 | `claude -c` | Resume most recent session | Coming back to yesterday's work |
 | `claude -r [session-id]` | Resume specific session | Coming back to a named session |
 
-### Context and cost visibility
+### Context and usage visibility
 
 | Command | What it shows |
 |---|---|
 | `/context` | Context window usage (%) |
-| `/usage` | Session cost, plan usage limits, activity stats |
-| `/cost` | Alias for `/usage` |
+| `/usage` | Session activity and plan usage information available to your account |
 | `/stats` | Alias for `/usage`, opening on the Stats tab |
 | `/status` | Active settings sources, MCP servers, model |
 | `/doctor` | Installation health check |
@@ -1230,12 +1276,16 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 | Command | Effect |
 |---|---|
 | `/model` | Open model picker |
-| `/effort low` | Minimal reasoning — fast, cheap, routine tasks |
-| `/effort medium` | Balanced reasoning for everyday work |
-| `/effort high` | Deeper reasoning for complex debugging and architecture — **default** |
+| `/effort low` | Minimal reasoning for short, scoped tasks |
+| `/effort medium` | Reduced reasoning for tasks that are not intelligence-sensitive |
+| `/effort high` | Deeper reasoning for complex debugging and architecture |
 | `/effort xhigh` | Extended reasoning for hard, multi-step problems |
 | `/effort max` | Maximum reasoning depth — reserved for the hardest tasks |
-| `ultrathink` in prompt | Triggers deeper reasoning for that one turn only |
+| `/effort auto` | Return to the active model's default |
+| `ultrathink` in prompt | Adds an in-context reasoning instruction for that turn; it does not change the configured effort level |
+
+Available effort levels depend on the active model; Claude Code falls back when a
+requested level is unsupported.
 
 ### Workflow
 
@@ -1261,170 +1311,41 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 
 ---
 
-## 13. Usage Monitoring — Pro/Max Plans
+## 13. Usage Monitoring
 
-Pro and Max subscribers pay a flat monthly fee, so dollar figures are not what constrains you. What matters is **plan allocation**: a shared pool across claude.ai and Claude Code that resets every 7 days, with a 5-hour rolling window per session.
+Use Claude Code's built-in views as the authoritative source. Availability and the
+exact fields shown depend on the active account and environment.
 
-### Built-in commands (use these first)
-
-| Command | What it shows | Plan |
-|---|---|---|
-| `/usage` | Session cost, plan usage limits, activity stats | All |
-| `/stats` | Alias for `/usage`, opens on the Stats tab | All |
-| `/cost` | Alias for `/usage` | All |
-| `/context` | Context window % used in current session | All |
-| `/status` | Active model, settings, MCP servers | All |
-| Settings → Usage (claude.ai) | Weekly progress bar with % consumed | Pro / Max |
-
-> `/usage`, `/cost` and `/stats` are the same command. On a Pro, Max, Team or Enterprise plan it includes a breakdown of what counts against your plan limits — it is not an API-only command.
-
-### Understanding your real token footprint
-
-Claude Code logs every session as JSONL files in `~/.claude/projects/`. The raw token count is misleading because **cache reads are billed at 0.1×** while output tokens cost 5× more than input. Use a cost-weighted view to understand your actual budget consumption.
-
-**Example output from the `usage-monitor` skill :**
-
-```
-========================================================
-  CLAUDE CODE USAGE — Pro Plan (token breakdown)
-  2026-03-28 11:06 UTC
-========================================================
-  TODAY  (2 sessions)
-    Real input    :           67
-    Cache create  :      139,614   (1.25x)
-    Cache reads   :    1,265,080   (0.1x — cheap)
-    Output        :       14,037   (5x)
-    Cost-weighted :      371,278 units
-
-  LAST 7 DAYS  (4 sessions)
-    Real input    :       35,717
-    Cache create  :    4,991,214   (1.25x)
-    Cache reads   :   44,034,128   (0.1x — cheap)
-    Output        :      355,421   (5x)
-    Raw total     :   49,416,480   (inflated by cache reads)
-    Cost-weighted :   12,455,252 units
-
-  WEEKLY BUDGET (cost-weighted heuristic)
-    [████████████░░░░░░░░] 62.3%
-  >> >50% — monitor closely, prefer /compact
-========================================================
-```
-
-The key insight from this output: **raw token total (49M) is dominated by cache reads** billed at 0.1×. Weighting them makes the figure a far better proxy for effort than the raw count. Never panic at the raw number.
-
-> **What this figure is not.** It is a local heuristic, not your remaining plan budget.
-> Anthropic does not publish a Pro ceiling expressed in weighted units, so the 20M
-> figure below is an assumption, not a documented limit. The JSONL files also cover
-> only this machine's Claude Code sessions — claude.ai, cloud sessions and other
-> surfaces share the same allocation without appearing here. For the real numbers,
-> use `/usage`; treat this skill as a trend indicator between checks.
-
-### The usage-monitor skill
-
-> **Location :** This skill lives in `~/.claude/skills/usage-monitor/SKILL.md` (your **global** home directory, not the project). It's available across all projects.
-
-Create it once with this prompt in Claude Code, then invoke with `/usage-monitor` at session start or whenever you want a budget check:
-
-```
-Create a skill at ~/.claude/skills/usage-monitor/SKILL.md that tracks
-my weekly Claude Code usage as a Pro subscriber.
-
-Skill frontmatter:
-  name: usage-monitor
-  description: >
-    Track weekly Claude Code usage limits for Pro plan.
-    Triggers: "how much have I used", "check my limits", "weekly usage",
-    "am I close to the limit", "usage reset", at the start of any session
-    where budget awareness matters.
-
-The skill must include an inline bash script (no external file) that:
-1. Parses ~/.claude/projects/**/*.jsonl to extract usage events
-2. Computes for TODAY and LAST 7 DAYS:
-   - input_tokens, cache_creation_input_tokens (×1.25),
-     cache_read_input_tokens (×0.1), output_tokens (×5)
-   - cost_weighted = input + cache_create×1.25 + cache_read×0.1 + output×5
-   - session count
-3. Estimates a weekly trend using 20,000,000 cost-weighted units as an
-   UNDOCUMENTED local assumption for the Pro ceiling — label it as such in
-   the output, and point the reader to `/usage` for the authoritative figure
-4. Renders the output in the exact format shown in the skill examples section
-5. Prints a recommendation based on threshold:
-   - <50%  → "on track — normal workflow"
-   - 50–75% → "monitor closely, prefer /compact"
-   - 75–90% → "budget tight — switch to Haiku for exploration"
-   - >90%  → "critical — /clear aggressively, Haiku only"
-
-Also include in the skill:
-- The 5-hour rolling window explanation and how to pace sessions
-- Model switching rule: drop to Haiku mid-week when >75%
-- The ccusage commands (npx ccusage, npx ccusage daily)
-- A weekly planning table template
-
-After creating the skill, run the bash script immediately to show current state.
-```
-
-### Community tools (no install required)
-
-```bash
-# Full dashboard — reads local JSONL files, nothing sent externally
-npx ccusage
-
-# By day (last 7 days)
-npx ccusage daily
-
-# By session
-npx ccusage --session
-
-# Real-time monitor (separate terminal window while Claude Code runs)
-pip install claude-monitor --quiet && claude-monitor --plan pro
-# or: uvx claude-monitor --plan pro
-```
-
-### Weekly budget strategy
-
-The weekly limit resets every 7 days. Plan intensive work accordingly:
-
-| Weekly usage | Recommended action |
+| Command | What it shows |
 |---|---|
-| < 50% | Normal workflow — all models available |
-| 50–75% | Prefer `/compact` often, avoid long explorations without subagents |
-| 75–90% | Switch to Haiku for all exploration subagents, Sonnet for core tasks only |
-| > 90% | `/clear` aggressively between tasks, Haiku only, defer non-urgent work |
-| Limit hit | Switch to API pay-as-you-go via `claude logout` → re-login with Console account |
+| `/usage` | Usage information available to the current account |
+| `/stats` | Alias for `/usage`, opening on the Stats tab |
+| `/context` | Current context-window occupancy and its main contributors |
+| `/status` | Active model, settings sources and connected services |
 
-**5-hour rolling window :** Each session window starts at your first prompt and resets 5 hours later. Heavy multi-file agentic work burns this faster. Plan intensive sessions (big refactors, architecture work) at the **start** of a fresh window, not the end.
-
-**Model cost weight (relative to Sonnet) :**
-
-| Model | Cost weight | Use for |
-|---|---|---|
-| Haiku 4.5 | ~0.5× | All exploration subagents, simple grep/read tasks |
-| Sonnet 5 | 1× (baseline) | Default — 95% of tasks |
-| Opus 5 | ~2.5× | Architecture decisions, complex multi-step reasoning only |
-| Fable 5.1 | ~5× | Rare, highest-capability tasks only |
-
-Sonnet 5 is itself cheaper than Sonnet 4.6 ($2/$10 per million input/output tokens vs $3/$15) — the weights above are relative to Sonnet 5, not an older generation.
-
-Switching from Sonnet to Haiku for exploration subagents when above 75% weekly usage extends your budget significantly without impacting output quality on the core tasks.
+Local JSONL session files under `~/.claude/projects/` are implementation data, not
+an authoritative account-usage ledger. They omit activity from other machines and
+surfaces, and their schema can change. If you inspect them, report raw fields with
+their source and timestamp; do not convert them into a fabricated quota or financial
+estimate.
 
 ---
 
 ## 14. Token Optimization Table
 
-| Technique | Mechanism | Estimated impact |
+| Technique | Mechanism | Verification |
 |---|---|---|
-| CLAUDE.md ≤ 150 lines | Less context loaded at startup | −2k–8k tokens/session |
-| Skills on-demand | Skill content loads only when invoked | −1k–5k tokens/session |
-| Large-file hook (>300 lines) | Intercept before context pollution | −10k–50k tokens/session |
-| `/compact` every 30 min | Eliminate accumulated noise | Variable, often largest gain |
-| `/clear` between tasks | Zero carryover between unrelated work | ~100% context freed |
-| `/btw` for quick lookups | Never enters conversation history | −500–2k per lookup |
-| Haiku for subagents | ~2× cheaper model for exploration | ~−50% on research calls |
-| `--allowedTools` in CI | Narrow tool surface in GitHub Actions | −40–60% in CI runs |
-| `effortLevel: medium` override | Prevents over-thinking on routine tasks (actual default is `high`) | Baseline efficiency |
-| SessionStart hook with git context | Avoid manual `git status` at start | −200–500 tokens/session |
+| Keep `CLAUDE.md` concise | Reduces instructions loaded on every request | Inspect `/context` before and after |
+| Move procedures to skills | Loads the body when the skill is invoked | Confirm skill discovery and invocation |
+| Use a large-file advisory hook | Suggests targeted extraction without preventing full reads | Test small, large and missing paths |
+| Use subagents for bounded research | Keeps exploration history outside the main conversation | Check the returned summary and main context |
+| `/clear` between unrelated tasks | Starts the next task with empty conversation history | Confirm with `/context` |
+| `/btw` for side questions | Keeps the side exchange out of conversation history | Confirm with `/context` |
+| Choose effort per task | Avoids a global capability trade-off | Evaluate representative tasks at each level |
+| Keep prompt prefixes stable | Preserves cache eligibility across repeated requests | Compare API usage fields where available |
 
-**Monitoring :** Run `/context` every 20–30 min. At 70%+, compact before degradation begins. Run `/usage-monitor` at session start when on Pro/Max to check weekly budget.
+Treat every optimization as a hypothesis. Keep it only when representative tasks
+still pass their correctness checks and the measured context footprint improves.
 
 ---
 
@@ -1436,8 +1357,8 @@ project/
 │   ├── settings.json              # Team-shared config (committed)
 │   ├── settings.local.json        # Per-machine overrides (gitignored)
 │   ├── hooks/
-│   │   ├── guard-git.sh           # Block git write ops (PreToolUse)
-│   │   ├── guard-large-read.sh    # Block reads > 300 lines (PreToolUse)
+│   │   ├── validate-bash.sh       # Intercept known-dangerous commands (PreToolUse)
+│   │   ├── advise-large-read.sh   # Add guidance for large reads (PreToolUse)
 │   │   ├── auto-format.sh         # Auto-format on write/edit (PostToolUse)
 │   │   ├── gate-tests.sh          # Block Stop while tests fail
 │   │   └── gate-typecheck.sh      # Block Stop while tsc fails
@@ -1448,13 +1369,11 @@ project/
 │   │   │   └── SKILL.md           # PR review checklist
 │   │   ├── test-writing/
 │   │   │   └── SKILL.md           # Jest test patterns
-│   │   ├── git-safe/
-│   │   │   └── SKILL.md           # Diff + commit workflow
-│   │   └── usage-monitor/         # ~/.claude/skills/ (global)
-│   │       └── SKILL.md           # Weekly budget tracker (Pro/Max)
+│   │   └── git-safe/
+│   │       └── SKILL.md           # Diff + commit workflow
 │   └── agents/
-│       ├── code-explorer.md       # Haiku — cheap exploration
-│       └── pr-reviewer.md         # Sonnet — thorough review
+│       ├── code-explorer.md       # Isolated codebase exploration
+│       └── pr-reviewer.md         # Isolated thorough review
 │
 ├── .github/
 │   └── workflows/
@@ -1462,7 +1381,7 @@ project/
 │       ├── claude-review.yml      # PR review on open/sync
 │       └── claude-security.yml    # Security scan on push
 │
-├── CLAUDE.md                      # Project context (≤150 lines)
+├── CLAUDE.md                      # Project context (target: under 200 lines)
 ├── REVIEW.md                      # Code quality contract
 ├── README.md
 │
@@ -1480,14 +1399,14 @@ project/
 
 **File scope summary :**
 
-| File | Loaded when | Token cost |
+| File | Loaded when | Context behavior |
 |---|---|---|
 | `CLAUDE.md` | Every session start | Always — keep it short |
 | `~/.claude/CLAUDE.md` | Every session start | Always — keep it short |
-| `SKILL.md` (description only) | Every session start | ~30–50 tokens per skill |
-| `SKILL.md` (full content) | When skill is invoked | On-demand only |
-| `agents/*.md` (description only) | Every session start | ~30–50 tokens per agent |
-| `agents/*.md` (full content) | When subagent spawns | On-demand only |
+| Model-invocable skill metadata | Session start | Name and description remain discoverable |
+| `SKILL.md` body | When the skill is invoked | Added to the active context |
+| Subagent metadata | During agent discovery | Description enables delegation |
+| Subagent instructions | When the subagent spawns | Loaded in the subagent's isolated context |
 
 ---
 
@@ -1501,8 +1420,8 @@ project/
 | `"disabledMcpServers"` | Correct key is `"disabledMcpjsonServers"` |
 | `mode: "review-only"` in claude-code-action | Does not exist. Use `--allowedTools` in `claude_args`. |
 | `"allowFileModification": false` | Does not exist. Use `deny` rules on `Edit`/`Write`. |
-| CLAUDE.md > 300 lines | Performance degrades. Split into skills. |
-| Putting workflows in CLAUDE.md | Costs tokens every session. Move to skills. |
+| CLAUDE.md grows beyond the documented target | Keep it under 200 lines; move procedures to skills. |
+| Putting workflows in CLAUDE.md | Adds tokens every session. Move them to skills. |
 
 ### Hooks mistakes
 
@@ -1521,11 +1440,11 @@ project/
 
 | Mistake | Correct approach |
 |---|---|
-| `cat large-file.log` for debugging | `grep -i "error\|fail" logfile.log \| tail -50` |
-| Reading entire directories to understand structure | `find . -name "*.ts" \| head -20` + grep for symbols |
-| Not compacting between tasks | Context accumulates. `/compact` or `/clear` at task boundaries. |
-| Asking Claude to read a PDF directly | Convert to text first: `pdftotext file.pdf - \| head -c 20000` |
-| Ignoring the "context is getting large" warning | Act on it immediately — performance is already degrading. |
+| Dumping a large log before locating relevant events | Search by error, time range, or request ID first; expand when the surrounding context is needed. |
+| Reading an entire directory before identifying entry points | Map files and symbols first, then read the files required for correctness. |
+| Carrying unrelated conversation history into a new task | Use `/clear` between unrelated tasks; use `/compact` when continuing the same task with less history. |
+| Sending raw PDF binary as text context | Extract searchable text first, then process every section required by the task. |
+| Treating a context warning as a fixed action threshold | Inspect `/context`, then compact, clear, or delegate according to what the active task still needs. |
 
 ### GitHub Actions mistakes
 
@@ -1534,7 +1453,7 @@ project/
 | `contents: write` on review-only jobs | `contents: read` is sufficient for reading code |
 | No `fetch-depth: 0` in checkout | Claude can't see git diff accurately without full history |
 | Using `GITHUB_TOKEN` when sticky comments are needed | Sticky comments only work with `claude[bot]` auth — remove `github_token` override |
-| No `timeout-minutes` on Claude jobs | Long-running jobs burn quota. Set `timeout-minutes: 10` |
+| No `timeout-minutes` on Claude jobs | Jobs can continue unnecessarily. Set a task-appropriate timeout. |
 
 ---
 
@@ -1546,15 +1465,11 @@ project/
 | Hooks reference | https://code.claude.com/docs/en/hooks |
 | GitHub Actions | https://code.claude.com/docs/en/github-actions |
 | Best practices | https://code.claude.com/docs/en/best-practices |
-| Manage costs | https://code.claude.com/docs/en/costs |
 | Skill authoring | https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices |
 | Subagents | https://code.claude.com/docs/en/sub-agents |
 | Memory & CLAUDE.md | https://code.claude.com/docs/en/memory |
 | Model configuration | https://code.claude.com/docs/en/model-config |
 | claude-code-action | https://github.com/anthropics/claude-code-action |
-| ccusage (usage analytics) | https://github.com/ryoppippi/ccusage |
-| Claude Code Usage Monitor | https://github.com/Maciek-roboblog/Claude-Code-Usage-Monitor |
-| Pro/Max usage limits | https://support.claude.com/en/articles/11145838-using-claude-code-with-your-pro-or-max-plan |
 
 ---
 
@@ -1567,13 +1482,6 @@ Contributions are welcome — open an issue or submit a PR.
 - One technique per section — no walls of text
 - Update the Table of Contents if you add a section
 - Test hook scripts before submitting: `echo '{"tool_name":"Read","tool_input":{"file_path":"/tmp/test"}}' | bash .claude/hooks/your-hook.sh`
-
----
-
-## License
-
-This playbook is released under the [MIT License](./LICENSE).
-You are free to use, modify, and redistribute it — with attribution.
 
 ---
 
