@@ -295,7 +295,10 @@ CLAUDE.md is loaded into context at the start of every session — every line co
 
 The context window holds everything: conversation history, file reads, bash output, CLAUDE.md, skills loaded, subagent responses. It fills fast. LLM performance degrades as it fills — Claude "forgets" earlier instructions, makes more mistakes.
 
-**The auto-compact threshold is ~85% by default.** Do not wait for it. Manage context proactively.
+**Auto-compaction is configured as a token budget, not a universal percentage.** The
+*auto-compact window* is how full the context may get before Claude Code compacts, and
+its default is tuned per model — on Sonnet 5's 1M context, sessions compact at roughly
+967K tokens. Do not wait for it. Manage context proactively.
 
 ### When to use each command
 
@@ -322,8 +325,20 @@ Named sessions appear in history and are findable weeks later.
 
 **Compaction is triggered by :**
 - You running `/compact`
-- Auto-compact at ~85% fill
-- You can lower the threshold : `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60` — it cannot be raised above ~83% because of the reserved buffer
+- Auto-compaction, when the context reaches the auto-compact window
+
+**Setting the window (token counts, highest precedence last) :**
+
+| Where | How | Scope |
+|---|---|---|
+| `autoCompactWindow` in settings.json | `"autoCompactWindow": 500000` | Saved default |
+| `/autocompact <tokens>` | `/autocompact 500k` — `/autocompact auto` restores the tuned value | Writes the setting |
+| `--autocompact` flag | `claude --autocompact 500000` | One launch |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `100000`–`1000000`, plain integer only | Overrides all of the above |
+
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=60` still exists, but it is a **percentage of that
+window**, not of the model's context, and it can only compact *earlier* — values above
+the default are ignored.
 
 ### The subagent pattern for research
 
@@ -344,10 +359,34 @@ The subagent runs in a **separate, isolated context window**. It explores, then 
 Hooks are shell scripts (or HTTP endpoints) that run at specific points in Claude Code's lifecycle. Unlike CLAUDE.md instructions — which are requests Claude interprets — **hooks execute deterministically, every time**.
 
 **Exit code contract :**
-- `exit 0` → success (optionally with `{"decision": "allow"}` on stdout)
+- `exit 0` → success. Stdout is read as JSON when it looks like JSON, otherwise as plain text
 - `exit 1` → non-blocking error — shown to the user, execution continues
-- `exit 2` → blocking error — Claude receives the error on stderr and must address it
-- `exit 0` + JSON with `decision: block` on stdout → block with explanation
+- `exit 2` → blocking error — Claude receives the stderr message and must address it
+
+**Blocking a `PreToolUse` call — two valid shapes, never mixed :**
+
+1. **Plain text on stderr + `exit 2`.** Simplest, and what the hooks below use.
+2. **Structured JSON on stdout + `exit 0`**, with the decision nested inside
+   `hookSpecificOutput`:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Explain what to do instead"
+  }
+}
+```
+
+`permissionDecision` accepts `allow`, `deny` and `ask`.
+
+> **A top-level `{"decision": "block"}` does NOT work for `PreToolUse`.** That shape
+> belongs to other events such as `PostToolUse` and `Stop`. On `PreToolUse` the JSON
+> still parses, the misplaced field is ignored without an error, and **the tool call
+> proceeds** — a guardrail that looks installed and blocks nothing. Fields at the
+> wrong nesting level fail this way silently; run `claude --debug` and look for
+> `Hook JSON output had unrecognized keys` to catch it.
 
 **Hook input :** all hooks receive a JSON object on `stdin`. For tool events, `tool_name` and `tool_input` are the key fields.
 
@@ -370,23 +409,30 @@ Choose inline for simplicity, external scripts for maintainability.
 
 ```bash
 #!/bin/bash
-# Block git write operations — developer commits manually
+# Block git write operations — developer commits manually.
+# Protocol: plain text on stderr + exit 2. Silence + exit 0 to allow.
 set -euo pipefail
 
 INPUT=$(cat)
-CMD=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('command',''))" 2>/dev/null || echo "")
-
-if echo "$CMD" | grep -qE '^git\s+(push|commit|checkout|merge|rebase|reset\s+--hard|branch\s+-[dD])'; then
-  python3 -c "
+CMD=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
-cmd = '''$CMD'''
-print(json.dumps({
-  'decision': 'block',
-  'reason': f'Git write operation blocked by project policy: [{cmd}]. '
-            f'Review changes with: git diff, then commit manually.'
-}))
-"
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeError, ValueError):
+    sys.exit(0)
+if isinstance(data, dict):
+    print(data.get('tool_input', {}).get('command', ''))
+" 2>/dev/null || true)
+
+if [ -z "${CMD:-}" ]; then
   exit 0
+fi
+
+# POSIX classes: grep -E does not understand \s.
+if printf '%s' "$CMD" | grep -qE '^git[[:space:]]+(push|commit|checkout|merge|rebase|reset[[:space:]]+--hard|branch[[:space:]]+-[dD])([[:space:]]|$)'; then
+  printf 'Git write operation blocked by project policy: %s\n' "$CMD" >&2
+  printf 'Review the changes with git diff, then commit manually.\n' >&2
+  exit 2
 fi
 
 exit 0
@@ -398,35 +444,35 @@ exit 0
 
 ```bash
 #!/bin/bash
-# Block Read tool on files > 300 lines — enforce grep/sed extraction
+# Block Read tool on files > 300 lines — enforce grep/sed extraction.
+# Protocol: plain text on stderr + exit 2. Silence + exit 0 to allow.
 set -euo pipefail
 
 INPUT=$(cat)
-FILE=$(echo "$INPUT" | python3 -c "
+FILE=$(printf '%s' "$INPUT" | python3 -c "
 import json, sys
-print(json.load(sys.stdin).get('tool_input', {}).get('file_path', ''))
-" 2>/dev/null || echo "")
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeError, ValueError):
+    sys.exit(0)
+if isinstance(data, dict):
+    print(data.get('tool_input', {}).get('file_path', ''))
+" 2>/dev/null || true)
 
 # Early exit: no file path or file doesn't exist
-if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+if [ -z "${FILE:-}" ] || [ ! -f "$FILE" ]; then
   exit 0
 fi
 
-LINES=$(wc -l < "$FILE" 2>/dev/null || echo 0)
+LINES=$(wc -l < "$FILE" 2>/dev/null | tr -d '[:space:]' || echo 0)
+case "$LINES" in ''|*[!0-9]*) exit 0 ;; esac
+
 if [ "$LINES" -gt 300 ]; then
-  python3 -c "
-import json
-print(json.dumps({
-  'decision': 'block',
-  'reason': (
-    '$FILE has $LINES lines (~' + str($LINES * 5) + ' tokens). '
-    'Use targeted extraction: '
-    'grep -n \"pattern\" $FILE | head -20 '
-    'or: sed -n \"/^def target/,/^def /p\" $FILE | head -50'
-  )
-}))
-"
-  exit 0
+  printf '%s has %s lines. Use targeted extraction instead of a full read:\n' "$FILE" "$LINES" >&2
+  printf '  grep -n "pattern" %s | head -20\n' "$FILE" >&2
+  printf '  sed -n "/^def target/,/^def /p" %s | head -50\n' "$FILE" >&2
+  printf 'Read the whole file only when the task needs its global context.\n' >&2
+  exit 2
 fi
 
 exit 0
@@ -479,13 +525,57 @@ exit 0
 
 **In `.claude/settings.json` hooks section :**
 
+> **The pipeline trap.** A command like `npm run test 2>&1 | tail -5 || exit 2` never
+> blocks: a pipeline's exit status is that of its **last** command, so `tail` returns 0
+> and `|| exit 2` never fires. The gate reports success while the suite is red. Use an
+> external script with `set -o pipefail`, as below.
+
+**`.claude/hooks/gate-tests.sh`** — make executable with `chmod +x`
+
+```bash
+#!/bin/bash
+# Stop hook: refuse to end the turn while the test suite is failing.
+set -uo pipefail
+
+INPUT=$(cat)
+
+# stop_hook_active guards against an infinite loop: it is true when this hook
+# already caused Claude to keep working.
+ACTIVE=$(printf '%s' "$INPUT" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeError, ValueError):
+    sys.exit(0)
+print('true' if isinstance(data, dict) and data.get('stop_hook_active') else '')
+" 2>/dev/null || true)
+
+if [ -n "${ACTIVE:-}" ]; then
+  exit 0
+fi
+
+# pipefail makes the pipeline carry npm's status, not tail's.
+OUTPUT=$(npm run test 2>&1)
+STATUS=$?
+
+if [ "$STATUS" -ne 0 ]; then
+  printf 'Test suite failed (exit %s). Last lines:\n' "$STATUS" >&2
+  printf '%s\n' "$OUTPUT" | tail -20 >&2
+  exit 2
+fi
+
+exit 0
+```
+
+Register it in `.claude/settings.json` :
+
 ```json
 "Stop": [
   {
     "hooks": [
       {
         "type": "command",
-        "command": "INPUT=$(cat); [ \"$(echo $INPUT | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\\\"stop_hook_active\\\", False))')\" = 'True' ] && exit 0; npm run test 2>&1 | tail -5 || exit 2"
+        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gate-tests.sh"
       }
     ]
   }
@@ -496,13 +586,16 @@ exit 0
 
 ### Hook 5 : SessionStart — inject git context
 
+`SessionStart` is one of the few events where **plain stdout already reaches Claude's
+context**, so a hook that only loads context needs no JSON at all:
+
 ```json
 "SessionStart": [
   {
     "hooks": [
       {
         "type": "command",
-        "command": "echo \"{\\\"additionalContext\\\": \\\"Branch: $(git branch --show-current 2>/dev/null || echo 'no-git') | Last commit: $(git log --oneline -1 2>/dev/null || echo 'none')\\\"}\""
+        "command": "echo \"Branch: $(git branch --show-current 2>/dev/null || echo no-git) | Last commit: $(git log --oneline -1 2>/dev/null || echo none)\""
       }
     ]
   }
@@ -510,6 +603,17 @@ exit 0
 ```
 
 This injects the current git branch and last commit into every session start — Claude knows where it is without reading git manually.
+
+> **If you do emit JSON, nest it.** A top-level `{"additionalContext": "..."}` parses
+> but is ignored, and the context never arrives. The structured form is:
+>
+> ```json
+> {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "..."}}
+> ```
+>
+> Use it only when you need to combine context with another field such as
+> `sessionTitle`. For plain context, the `echo` above is less error-prone — it avoids
+> three levels of shell quote escaping.
 
 ---
 
@@ -524,7 +628,7 @@ Skills are on-demand context: **zero startup cost, full content loaded only when
 
 **`.claude/skills/project-architecture/SKILL.md`**
 
-```markdown
+````markdown
 ---
 name: project-architecture
 description: >
@@ -562,13 +666,13 @@ grep -n "^import" src/auth/middleware.ts
 # Who imports a given module
 grep -rn "from.*auth/middleware" src/ --include="*.ts"
 ```
-```
+````
 
 ### Skill: code-review
 
 **`.claude/skills/code-review/SKILL.md`**
 
-```markdown
+````markdown
 ---
 name: code-review
 description: >
@@ -628,13 +732,13 @@ git diff HEAD~1 -- path/to/file.ts  # Targeted diff for one file
 ### 💡 Suggestions (non-blocking)
 - [optional improvements]
 ```
-```
+````
 
 ### Skill: test-writing
 
 **`.claude/skills/test-writing/SKILL.md`**
 
-```markdown
+````markdown
 ---
 name: test-writing
 description: >
@@ -695,13 +799,13 @@ export const buildTestUser = (overrides: Partial<User> = {}): User => ({
   ...overrides,
 });
 ```
-```
+````
 
 ### Skill: git-safe
 
 **`.claude/skills/git-safe/SKILL.md`**
 
-```markdown
+````markdown
 ---
 name: git-safe
 description: >
@@ -738,7 +842,7 @@ git commit -m "feat(auth): ..."     # Conventional commits format
 ```
 `attribution: {commit: "", pr: ""}` in settings.json ensures
 no `Co-Authored-By: Claude` line appears — even if you forget.
-```
+````
 
 ---
 
@@ -755,7 +859,7 @@ Subagents are separate Claude Code instances with their own context window. When
 
 **`.claude/agents/code-explorer.md`**
 
-```markdown
+````markdown
 ---
 name: code-explorer
 description: >
@@ -787,7 +891,7 @@ Return a JSON block:
   "grep_calls": 5
 }
 ```
-```
+````
 
 ### Subagent: pr-reviewer (Sonnet — thorough review)
 
@@ -1041,13 +1145,50 @@ The `auto-format.sh` hook fires on every `Write|Edit|MultiEdit` event. For TypeS
 
 ### Type-check hook (Stop) — gate the session end
 
+Same pipeline trap as §6: `npx tsc --noEmit | tail -10 || exit 2` returns `tail`'s
+status, so it never blocks. Capture the status before piping.
+
+**`.claude/hooks/gate-typecheck.sh`**
+
+```bash
+#!/bin/bash
+# Stop hook: refuse to end the turn while TypeScript does not compile.
+set -uo pipefail
+
+INPUT=$(cat)
+
+ACTIVE=$(printf '%s' "$INPUT" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeError, ValueError):
+    sys.exit(0)
+print('true' if isinstance(data, dict) and data.get('stop_hook_active') else '')
+" 2>/dev/null || true)
+
+if [ -n "${ACTIVE:-}" ]; then
+  exit 0
+fi
+
+OUTPUT=$(npx tsc --noEmit 2>&1)
+STATUS=$?
+
+if [ "$STATUS" -ne 0 ]; then
+  printf 'TypeScript check failed (exit %s):\n' "$STATUS" >&2
+  printf '%s\n' "$OUTPUT" | tail -20 >&2
+  exit 2
+fi
+
+exit 0
+```
+
 ```json
 "Stop": [
   {
     "hooks": [
       {
         "type": "command",
-        "command": "INPUT=$(cat); ACTIVE=$(echo \"$INPUT\" | python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"stop_hook_active\", False))'); [ \"$ACTIVE\" = 'True' ] && exit 0; npx tsc --noEmit 2>&1 | tail -10 || exit 2"
+        "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/gate-typecheck.sh"
       }
     ]
   }
@@ -1078,8 +1219,9 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 | Command | What it shows |
 |---|---|
 | `/context` | Context window usage (%) |
-| `/cost` | Token usage + cost this session (API users) |
-| `/stats` *(unofficial — not in the official docs)* | Usage breakdown (Pro/Max users) |
+| `/usage` | Session cost, plan usage limits, activity stats |
+| `/cost` | Alias for `/usage` |
+| `/stats` | Alias for `/usage`, opening on the Stats tab |
 | `/status` | Active settings sources, MCP servers, model |
 | `/doctor` | Installation health check |
 
@@ -1121,19 +1263,20 @@ Claude cannot declare a task done if TypeScript type-check fails. `exit 2` cause
 
 ## 13. Usage Monitoring — Pro/Max Plans
 
-Pro and Max subscribers pay a flat monthly fee — `/cost` reports token counts but **not billable dollars**. What matters is **weekly allocation**: a shared pool across claude.ai and Claude Code that resets every 7 days, with a 5-hour rolling window per session.
+Pro and Max subscribers pay a flat monthly fee, so dollar figures are not what constrains you. What matters is **plan allocation**: a shared pool across claude.ai and Claude Code that resets every 7 days, with a 5-hour rolling window per session.
 
 ### Built-in commands (use these first)
 
 | Command | What it shows | Plan |
 |---|---|---|
-| `/stats` *(unofficial — not in the official docs)* | Usage patterns over time | Pro / Max |
-| `/usage` | Reset timing + remaining allocation | Pro / Max |
+| `/usage` | Session cost, plan usage limits, activity stats | All |
+| `/stats` | Alias for `/usage`, opens on the Stats tab | All |
+| `/cost` | Alias for `/usage` | All |
 | `/context` | Context window % used in current session | All |
 | `/status` | Active model, settings, MCP servers | All |
 | Settings → Usage (claude.ai) | Weekly progress bar with % consumed | Pro / Max |
 
-> `/cost` is for **API pay-as-you-go users only** — it shows token counts but is irrelevant for billing on Pro/Max.
+> `/usage`, `/cost` and `/stats` are the same command. On a Pro, Max, Team or Enterprise plan it includes a breakdown of what counts against your plan limits — it is not an API-only command.
 
 ### Understanding your real token footprint
 
@@ -1167,7 +1310,14 @@ Claude Code logs every session as JSONL files in `~/.claude/projects/`. The raw 
 ========================================================
 ```
 
-The key insight from this output: **raw token total (49M) is dominated by cache reads** billed at 0.1×. The cost-weighted figure (12.4M units) is what actually counts toward your weekly limit. Never panic at the raw number.
+The key insight from this output: **raw token total (49M) is dominated by cache reads** billed at 0.1×. Weighting them makes the figure a far better proxy for effort than the raw count. Never panic at the raw number.
+
+> **What this figure is not.** It is a local heuristic, not your remaining plan budget.
+> Anthropic does not publish a Pro ceiling expressed in weighted units, so the 20M
+> figure below is an assumption, not a documented limit. The JSONL files also cover
+> only this machine's Claude Code sessions — claude.ai, cloud sessions and other
+> surfaces share the same allocation without appearing here. For the real numbers,
+> use `/usage`; treat this skill as a trend indicator between checks.
 
 ### The usage-monitor skill
 
@@ -1194,8 +1344,9 @@ The skill must include an inline bash script (no external file) that:
      cache_read_input_tokens (×0.1), output_tokens (×5)
    - cost_weighted = input + cache_create×1.25 + cache_read×0.1 + output×5
    - session count
-3. Estimates weekly budget % using 20,000,000 cost-weighted units as
-   the Pro plan heuristic ceiling
+3. Estimates a weekly trend using 20,000,000 cost-weighted units as an
+   UNDOCUMENTED local assumption for the Pro ceiling — label it as such in
+   the output, and point the reader to `/usage` for the authoritative figure
 4. Renders the output in the exact format shown in the skill examples section
 5. Prints a recommendation based on threshold:
    - <50%  → "on track — normal workflow"
@@ -1285,9 +1436,11 @@ project/
 │   ├── settings.json              # Team-shared config (committed)
 │   ├── settings.local.json        # Per-machine overrides (gitignored)
 │   ├── hooks/
-│   │   ├── guard-git.sh           # Block git write ops
-│   │   ├── guard-large-read.sh    # Block reads > 300 lines
-│   │   └── auto-format.sh        # Auto-format on write/edit
+│   │   ├── guard-git.sh           # Block git write ops (PreToolUse)
+│   │   ├── guard-large-read.sh    # Block reads > 300 lines (PreToolUse)
+│   │   ├── auto-format.sh         # Auto-format on write/edit (PostToolUse)
+│   │   ├── gate-tests.sh          # Block Stop while tests fail
+│   │   └── gate-typecheck.sh      # Block Stop while tsc fails
 │   ├── skills/
 │   │   ├── project-architecture/
 │   │   │   └── SKILL.md           # On-demand codebase map
@@ -1356,6 +1509,9 @@ project/
 | Mistake | Correct approach |
 |---|---|
 | `post-edit.sh "$1"` (file path as arg) | Hooks don't receive args. Parse the `tool_input.file_path` field from stdin JSON. |
+| `{"decision":"block"}` for `PreToolUse` | Wrong event shape — silently ignored, the call proceeds. Use stderr + `exit 2`, or nest `permissionDecision` in `hookSpecificOutput`. |
+| `npm test \| tail -5 \|\| exit 2` in a Stop hook | A pipeline returns `tail`'s status, so it never blocks. Capture the status before piping, or `set -o pipefail`. |
+| Top-level `additionalContext` | Ignored. Nest it in `hookSpecificOutput` — or for `SessionStart`, just print plain text. |
 | Not making hooks executable | `chmod +x .claude/hooks/*.sh` is required. |
 | Not checking `stop_hook_active` in Stop hooks | Causes infinite loops. Always gate on this field. |
 | Hardcoding paths in hook commands | Use `$CLAUDE_PROJECT_DIR` prefix for portability. |
